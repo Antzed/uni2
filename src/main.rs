@@ -9,11 +9,12 @@ use std::{
     path::{Path, PathBuf},
     process::{Command as Cmd, exit},
 };
+use tempfile::tempdir;
 
 /* ---------- static CLI (built-ins) ---------- */
 
 #[derive(Parser)]
-#[command(name = "mycli", version)]
+#[command(name = "uni", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<BuiltIn>,
@@ -25,6 +26,8 @@ enum BuiltIn {
     Remove { name: String },
     List,
     Create { name: String },  
+    Export { #[arg(default_value = "plugins.zip")] file: PathBuf },
+    Import { file: PathBuf },
 }
 
 /* ---------- manifest ---------- */
@@ -183,6 +186,61 @@ if __name__ == "__main__":
     Ok(path)
 }
 
+/* ---------- export CLI plugin commands ---------- */
+
+
+fn export_plugins(zip_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use zip::write::FileOptions;
+    use std::io::Write;
+
+    let file = std::fs::File::create(zip_path)?;        // std::fs::File::create :contentReference[oaicite:2]{index=2}
+    let mut zip = zip::ZipWriter::new(file);            // ZipWriter API :contentReference[oaicite:3]{index=3}
+    let opts = FileOptions::default().unix_permissions(0o644);
+
+    for entry in std::fs::read_dir(plugin_dir())? {     // read_dir iteration :contentReference[oaicite:4]{index=4}
+        let p = entry?.path();
+        if p.is_file() {
+            let name = p.file_name().unwrap().to_string_lossy();
+            zip.start_file(name, opts)?;                // each .py / .json becomes one entry
+            let data = std::fs::read(&p)?;
+            zip.write_all(&data)?;
+        }
+    }
+    zip.finish()?;                                     // flush central directory
+    println!("📦  Exported plugins to {}", zip_path.display());
+    Ok(())
+}
+
+/* ---------- import CLI plugin commands ---------- */
+
+
+fn import_plugins(zip_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read;
+    let file = std::fs::File::open(zip_path)?;
+    let mut archive = zip::read::ZipArchive::new(file)?;               // :contentReference[oaicite:0]{index=0}
+
+    // 1) unpack everything into an auto-cleaning temp dir
+    let tmp = tempfile::tempdir()?;                                    // :contentReference[oaicite:1]{index=1}
+    archive.extract(&tmp)?;                                            // single call does the loop for us :contentReference[oaicite:2]{index=2}
+
+    // 2) walk the temp dir and feed every NON-JSON file to the validator
+    for entry in std::fs::read_dir(&tmp)? {                            // :contentReference[oaicite:3]{index=3}
+        let p = entry?.path();
+        if p.extension().and_then(|e| e.to_str()) == Some("json") {    // skip manifests
+            continue;
+        }
+        if !p.is_file() { continue; }                                  // guard against stray dirs
+
+        match validate_and_copy(&p) {                                  // reuse your existing checks
+            Ok(m) => println!("➕  Imported {}", m.name),
+            Err(e) => eprintln!("⚠️  Skipped {}: {e}", p.display()),
+        }
+    }
+    Ok(())
+}
+
+
+
 fn build_cli() -> Command {
     let mut cmd = Cli::command();  // static built-ins
 
@@ -243,19 +301,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if let Some(("create", sub_m)) = matches.subcommand() {
-    let name = sub_m.get_one::<String>("name").unwrap();
-    match create_template(name) {
-        Ok(p) => {
-            println!(
-                "Created template at {}\n\
-                 ->  vim {}   # edit, test, iterate\n\
-                 ->  mycli add {}   # register once ready",
-                p.display(), p.display(), p.display()
-            );
+        let name = sub_m.get_one::<String>("name").unwrap();
+        match create_template(name) {
+            Ok(p) => {
+                println!(
+                    "Created template at {}\n\
+                    ->  vim {}   # edit, test, iterate\n\
+                    ->  mycli add {}   # register once ready",
+                    p.display(), p.display(), p.display()
+                );
+            }
+            Err(e) => eprintln!("Failed to write template: {e}"),
         }
-        Err(e) => eprintln!("Failed to write template: {e}"),
+        return Ok(());
     }
-    return Ok(());
+
+    if let Some(("export", sub)) = matches.subcommand() {
+        let path = sub.get_one::<PathBuf>("file").unwrap();
+        export_plugins(path)?;
+        return Ok(());
+    }
+
+    if let Some(("import", sub)) = matches.subcommand() {
+        let path = sub.get_one::<PathBuf>("file").unwrap();
+        import_plugins(path)?;
+        return Ok(());
     }
 
     // 2) Otherwise it must be a dynamically registered plugin

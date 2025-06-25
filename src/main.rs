@@ -134,7 +134,7 @@ fn create_template(name: &str) -> std::io::Result<PathBuf> {
 
     // Simple one-shot write; will overwrite if the file exists
     const TEMPLATE: &str = r#"#!/usr/bin/env python3
-import sys, json
+import sys, json, subprocess
 
 MANIFEST = {
     "name": "<<NAME>>",
@@ -145,6 +145,12 @@ MANIFEST = {
         { "name": "status", "description": "Show status" }
     ]
 }
+
+def run_cmd(cmd: list[str]) -> None:
+    """Run a shell command and stream its output; abort on failure."""
+    result = subprocess.run(cmd, check=False, text=True)
+    if result.returncode != 0:
+        sys.exit(result.returncode);:
 
 def manifest():
     print(json.dumps(MANIFEST))

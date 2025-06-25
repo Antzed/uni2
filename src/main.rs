@@ -9,7 +9,6 @@ use std::{
     path::{Path, PathBuf},
     process::{Command as Cmd, exit},
 };
-use tempfile::tempdir;
 
 /* ---------- static CLI (built-ins) ---------- */
 
@@ -28,6 +27,10 @@ enum BuiltIn {
     Create { name: String },  
     Export { #[arg(default_value = "plugins.zip")] file: PathBuf },
     Import { file: PathBuf },
+    EnsurePython {
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /* ---------- manifest ---------- */
@@ -225,7 +228,6 @@ fn export_plugins(zip_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 
 fn import_plugins(zip_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::Read;
     let file = std::fs::File::open(zip_path)?;
     let mut archive = zip::read::ZipArchive::new(file)?;               // :contentReference[oaicite:0]{index=0}
 
@@ -248,6 +250,88 @@ fn import_plugins(zip_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+/* ---------- check if python is installed ---------- */
+
+fn current_python_version() -> Option<String> {
+    let candidates = ["python3", "python"];
+    for exe in &candidates {
+        if let Ok(out) = Cmd::new(exe).arg("--version").output() {
+            // stdout on *nix, stderr on Windows; concatenate for safety
+            let buf = [out.stdout, out.stderr].concat();
+            let text = String::from_utf8_lossy(&buf);
+            // expect `Python 3.13.3`
+            if text.starts_with("Python") {
+                // second word is version
+                return text.split_whitespace().nth(1).map(|s| s.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn install_python() -> Result<(), Box<dyn std::error::Error>> {
+    let target = "3.13.3";
+    let os = std::env::consts::OS;
+
+    match os {
+        "windows" => {
+            // prefer winget (Win 11 / Server 2022)
+            if Cmd::new("where").arg("winget").output().is_ok() {
+                let status = Cmd::new("winget")
+                    .args(["install", "--id=Python.Python.3.13", "-e"])
+                    .status()?;
+                if status.success() { return Ok(()); }
+            }
+            // fall back to Chocolatey
+            let status = Cmd::new("choco")
+                .args(["install", "python313", "--yes"])
+                .status()?;
+            if status.success() { return Ok(()); }
+            Err("winget/choco installation failed".into())
+        }
+        "macos" => {
+            if Cmd::new("which").arg("brew").status()?.success() {
+                let status = Cmd::new("brew")
+                    .args(["install", "python@3.13"])
+                    .status()?;
+                if status.success() { return Ok(()); }
+            }
+            // fallback: pyenv
+            install_with_pyenv(target)
+        }
+        _ /* linux, bsd, etc. */ => install_with_pyenv(target),
+    }
+}
+
+fn install_with_pyenv(version: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // install pyenv if missing
+    if Cmd::new("which").arg("pyenv").status()?.success() == false {
+        println!("→ installing pyenv (curl | bash) …");
+        Cmd::new("bash")
+            .arg("-c")
+            .arg("curl -s https://pyenv.run | bash")
+            .status()?;
+        // user must add shims to PATH; best-effort reload
+        let home = std::env::var("HOME")?;
+        let old  = std::env::var("PATH").unwrap_or_default();
+        // # Safety
+        // `set_var` is unsafe because changing the environment is racy.  This CLI is
+        // single-threaded after this point, so it is sound here.
+        unsafe {
+            std::env::set_var("PATH", format!("{home}/.pyenv/bin:{home}/.pyenv/shims:{old}"));
+        }
+    }
+    println!("→ pyenv install {version}");
+    let status = Cmd::new("pyenv").args(["install", "-s", version]).status()?;
+    if !status.success() {
+        return Err("pyenv failed to build Python".into());
+    }
+    // make it the global default so `python3` finds it
+    Cmd::new("pyenv").args(["global", version]).status()?;
+    Ok(())
+}
+
 
 
 
@@ -337,6 +421,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         import_plugins(path)?;
         return Ok(());
     }
+
+    if let Some(("ensure-python", sub_m)) = matches.subcommand() {
+        let force = *sub_m.get_one::<bool>("force").unwrap();
+
+        let need_install = match current_python_version() {
+            Some(v) => {
+                if v == "3.13.3" {
+                    if !force {
+                        println!("✅  Python 3.13.3 already installed");
+                        false
+                    } else {
+                        println!("↻  Re-installing as --force requested");
+                        true
+                    }
+                } else {
+                    println!("ℹ️  Found Python {v}, upgrading to 3.13.3");
+                    true
+                }
+            }
+            None => {
+                println!("🚫  No python3 interpreter found – installing 3.13.3");
+                true
+            }
+        };
+
+        if need_install {
+            match install_python() {
+                Ok(_)  => println!("🎉  Python 3.13.3 ready ✔"),
+                Err(e) => eprintln!("❌  Installation failed: {e}"),
+            }
+        }
+        return Ok(());
+    }
+
 
     // 2) Otherwise it must be a dynamically registered plugin
     if let Some((pname, pm)) = matches.subcommand() {

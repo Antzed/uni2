@@ -69,7 +69,11 @@ fn validate_and_copy(path: &Path) -> Result<Manifest, Box<dyn std::error::Error>
         .arg("--manifest")
         .output()?;
     if !out.status.success() {
-        return Err("plugin did not return valid manifest".into());
+        eprintln!(
+            "plugin did not return valid manifest (exit {}):\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     let manifest: Manifest = serde_json::from_slice(&out.stdout)?;
 
@@ -150,7 +154,7 @@ def run_cmd(cmd: list[str]) -> None:
     """Run a shell command and stream its output; abort on failure."""
     result = subprocess.run(cmd, check=False, text=True)
     if result.returncode != 0:
-        sys.exit(result.returncode);:
+        sys.exit(result.returncode);
 
 def manifest():
     print(json.dumps(MANIFEST))

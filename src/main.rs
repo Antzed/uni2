@@ -67,7 +67,8 @@ fn ensure_plugin_dir() -> Result<(), IoError> {
 
 fn validate_and_copy(path: &Path) -> Result<Manifest, Box<dyn std::error::Error>> {
     // Run script with --manifest and parse JSON
-    let out = Cmd::new("python3")           // interpreter call avoids chmod issues
+    let out = Cmd::new("uv")      // interpreter call avoids chmod issues
+        .arg("run")
         .arg(path)
         .arg("--manifest")
         .output()?;
@@ -140,7 +141,13 @@ fn create_template(name: &str) -> std::io::Result<PathBuf> {
     let path      = std::env::current_dir()?.join(&file_name);
 
     // Simple one-shot write; will overwrite if the file exists
-    const TEMPLATE: &str = r#"#!/usr/bin/env python3
+    const TEMPLATE: &str = r#"#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.8"
+# dependencies = [
+#     ///add you dependencies here
+# ]
+# ///
 import sys, json, subprocess
 
 MANIFEST = {
@@ -270,6 +277,18 @@ fn current_python_version() -> Option<String> {
     None
 }
 
+/* ---------- check if uv is installed ---------- */
+fn current_uv_version() -> Option<String> {
+    if let Ok(out) = Cmd::new("uv").arg("--version").output() {
+        // output is like `uv 0.7.14`
+        let text = String::from_utf8_lossy(&out.stdout);
+        if text.starts_with("uv ") {
+            return text.split_whitespace().nth(1).map(str::to_owned);
+        }
+    }
+    None
+}
+
 fn install_python() -> Result<(), Box<dyn std::error::Error>> {
     let target = "3.13.3";
     let os = std::env::consts::OS;
@@ -330,6 +349,46 @@ fn install_with_pyenv(version: &str) -> Result<(), Box<dyn std::error::Error>> {
     // make it the global default so `python3` finds it
     Cmd::new("pyenv").args(["global", version]).status()?;
     Ok(())
+}
+
+fn install_uv() -> Result<(), Box<dyn std::error::Error>> {
+    let os = std::env::consts::OS;
+
+    match os {
+        "windows" => {
+            // PowerShell one-liner
+            let script = r#"irm https://astral.sh/uv/install.ps1 | iex"#;
+            let status = Cmd::new("powershell")
+                .args(["-ExecutionPolicy", "ByPass", "-c", script])
+                .status()?;
+            if status.success() { return Ok(()); }
+            Err("PowerShell uv install failed".into())
+        }
+        "macos" | "linux" => {
+            // Prefer Homebrew if present (instant bottles) :contentReference[oaicite:3]{index=3}
+            // if Cmd::new("which").arg("brew").status()?.success() &&
+            //    Cmd::new("brew").args(["install", "uv"]).status()?.success() {
+            //     return Ok(())
+            // }
+            // Fallback: official standalone installer (curl / wget) :contentReference[oaicite:4]{index=4}
+            let curl_ok = Cmd::new("bash")
+                .arg("-c")
+                .arg("curl -LsSf https://astral.sh/uv/install.sh | sh")
+                .status()?
+                .success();
+            if curl_ok { return Ok(()); }
+
+            let wget_ok = Cmd::new("bash")
+                .arg("-c")
+                .arg("wget -qO- https://astral.sh/uv/install.sh | sh")
+                .status()?
+                .success();
+            if wget_ok { return Ok(()); }
+
+            Err("curl/wget uv install failed".into())
+        }
+        _ => Err("unsupported OS for uv install".into()),
+    }
 }
 
 
@@ -425,31 +484,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(("ensure-python", sub_m)) = matches.subcommand() {
         let force = *sub_m.get_one::<bool>("force").unwrap();
 
-        let need_install = match current_python_version() {
-            Some(v) => {
-                if v == "3.13.3" {
-                    if !force {
-                        println!("✅  Python 3.13.3 already installed");
-                        false
-                    } else {
-                        println!("↻  Re-installing as --force requested");
-                        true
-                    }
-                } else {
-                    println!("ℹ️  Found Python {v}, upgrading to 3.13.3");
-                    true
-                }
+        /* ---------- 3.1 ensure CPython 3.13.3 ---------- */
+        let need_python = match current_python_version() {
+            Some(v) if v == "3.13.3" && !force => {
+                println!("✅ Python 3.13.3 already installed"); false
             }
-            None => {
-                println!("🚫  No python3 interpreter found – installing 3.13.3");
-                true
-            }
+            Some(v) => { println!("ℹ️  Found Python {v}, upgrading to 3.13.3"); true }
+            None     => { println!("🚫 No python3 – installing 3.13.3"); true }
         };
-
-        if need_install {
+        if need_python {
             match install_python() {
-                Ok(_)  => println!("🎉  Python 3.13.3 ready ✔"),
-                Err(e) => eprintln!("❌  Installation failed: {e}"),
+                Ok(_)  => println!("🎉 Python 3.13.3 ready ✔"),
+                Err(e) => { eprintln!("❌ Python install failed: {e}"); return Ok(()); }
+            }
+        }
+
+        /* ---------- 3.2 ensure uv ---------- */
+        match current_uv_version() {
+            Some(v) => println!("✅ uv {v} already installed"),
+            None => {
+                println!("→ installing uv …");
+                match install_uv() {
+                    Ok(_)  => println!("🎉 uv installed ✔"),
+                    Err(e) => eprintln!("❌ uv install failed: {e}"),
+                }
             }
         }
         return Ok(());

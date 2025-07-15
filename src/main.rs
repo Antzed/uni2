@@ -5,16 +5,24 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Error as IoError,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command as Cmd, exit},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+mod tui;
 
 /* ---------- static CLI (built-ins) ---------- */
 
 #[derive(Parser)]
 #[command(name = "uni", version)]
 struct Cli {
+    /// Launch interactive TUI mode
+    #[arg(short = 'i', long = "interactive")]
+    interactive: bool,
+    
     #[command(subcommand)]
     command: Option<BuiltIn>,
 }
@@ -84,9 +92,14 @@ fn validate_and_copy(path: &Path) -> Result<Manifest, Box<dyn std::error::Error>
     // Copy script
     let dest_script = plugin_dir().join(&manifest.name);
     fs::copy(path, &dest_script)?;
-    let mut perm = fs::metadata(&dest_script)?.permissions();
-    perm.set_mode(0o755);
-    fs::set_permissions(&dest_script, perm)?;
+    
+    // Make it executable on Unix; ignored on Windows
+    #[cfg(unix)]
+    {
+        let mut perm = fs::metadata(&dest_script)?.permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&dest_script, perm)?;
+    }
 
     // Save manifest JSON
     let dest_meta = plugin_dir().join(format!("{}.json", manifest.name));
@@ -435,6 +448,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // We need matches twice: once for built-ins, once for plugins
     let matches = build_cli().get_matches();
+
+    // Check if interactive mode is requested
+    if matches.get_flag("interactive") {
+        return tui::run_tui();
+    }
 
     // 1) Handle built-in subcommands if any
     if let Some(("add",  sub_m)) = matches.subcommand() {

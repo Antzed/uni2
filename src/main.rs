@@ -74,26 +74,29 @@ fn ensure_plugin_dir() -> Result<(), IoError> {
 /* ---------- add / remove / list ---------- */
 
 fn validate_and_copy(path: &Path) -> Result<Manifest, Box<dyn std::error::Error>> {
-    // Run script with --manifest and parse JSON
-    let out = Cmd::new("uv")      // interpreter call avoids chmod issues
-        .arg("run")
-        .arg(path)
-        .arg("--manifest")
-        .output()?;
+    // ----- 1. run the candidate with --manifest ---------------------------
+    let out = match path.extension().and_then(|e| e.to_str()) {
+        Some("py") => Cmd::new("uv")
+                        .args(["run", path.to_str().unwrap(), "--manifest"])
+                        .output()?,
+        _           => Cmd::new(path)
+                        .arg("--manifest")
+                        .output()?,
+    };
+
     if !out.status.success() {
-        eprintln!(
+        return Err(format!(
             "plugin did not return valid manifest (exit {}):\n{}",
             out.status,
             String::from_utf8_lossy(&out.stderr)
-        );
+        ).into());
     }
+
     let manifest: Manifest = serde_json::from_slice(&out.stdout)?;
 
-    // Copy script
+    // ----- 2. copy the binary / script & chmod ----------------------------
     let dest_script = plugin_dir().join(&manifest.name);
     fs::copy(path, &dest_script)?;
-    
-    // Make it executable on Unix; ignored on Windows
     #[cfg(unix)]
     {
         let mut perm = fs::metadata(&dest_script)?.permissions();
@@ -101,7 +104,7 @@ fn validate_and_copy(path: &Path) -> Result<Manifest, Box<dyn std::error::Error>
         fs::set_permissions(&dest_script, perm)?;
     }
 
-    // Save manifest JSON
+    // ----- 3. save manifest next to it ------------------------------------
     let dest_meta = plugin_dir().join(format!("{}.json", manifest.name));
     fs::write(dest_meta, serde_json::to_vec_pretty(&manifest)?)?;
 
@@ -413,6 +416,7 @@ fn build_cli() -> Command {
     let trailing = Arg::new("args")
         .num_args(..)
         .trailing_var_arg(true)          // captures --flags etc. :contentReference[oaicite:1]{index=1}
+        .allow_hyphen_values(true)
         .help("arguments forwarded to the plugin");
 
     for m in load_manifests() {          // parses *.json on disk

@@ -120,7 +120,7 @@ fn remove_plugin(name: &str) -> Result<(), IoError> {
     Ok(())
 }
 
-fn list_plugins() -> Result<(), IoError> {
+pub fn list_plugins() -> Result<(), IoError> {
     for entry in fs::read_dir(plugin_dir())? {
         let p = entry?.path();
         if p.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -410,6 +410,218 @@ fn install_uv() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
+/* ---------- CLI command execution from TUI ---------- */
+
+fn execute_cli_command(command_str: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse the command string (e.g., "uni git status" -> ["git", "status"])
+    let parts: Vec<&str> = command_str.split_whitespace().collect();
+    
+    if parts.is_empty() || parts[0] != "uni" {
+        return Err("Invalid command format".into());
+    }
+    
+    if parts.len() < 2 {
+        // Just "uni" - show help
+        build_cli().print_help()?;
+        println!();
+        return Ok(());
+    }
+    
+    let command_name = parts[1];
+    let remaining_args: Vec<&str> = parts[2..].to_vec();
+    
+    // Check if it's a built-in command
+    match command_name {
+        "add" => {
+            if remaining_args.is_empty() {
+                print!("Enter plugin file path: ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let path = PathBuf::from(input.trim());
+                let m = validate_and_copy(&path)?;
+                println!("Added plugin `{}` v{}", m.name, m.version);
+            } else {
+                let path = PathBuf::from(remaining_args[0]);
+                let m = validate_and_copy(&path)?;
+                println!("Added plugin `{}` v{}", m.name, m.version);
+            }
+        }
+        "remove" => {
+            if remaining_args.is_empty() {
+                print!("Enter plugin name to remove: ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let name = input.trim();
+                remove_plugin(name)?;
+                println!("Removed plugin `{}`", name);
+            } else {
+                let name = remaining_args[0];
+                remove_plugin(name)?;
+                println!("Removed plugin `{}`", name);
+            }
+        }
+        "list" => {
+            list_plugins()?;
+        }
+        "create" => {
+            if remaining_args.is_empty() {
+                print!("Enter plugin name: ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let name = input.trim();
+                match create_template(name) {
+                    Ok(p) => {
+                        println!(
+                            "Created template at {}\n\
+                            ->  vim {}   # edit, test, iterate\n\
+                            ->  uni add {}   # register once ready",
+                            p.display(), p.display(), p.display()
+                        );
+                    }
+                    Err(e) => eprintln!("Failed to write template: {e}"),
+                }
+            } else {
+                let name = remaining_args[0];
+                match create_template(name) {
+                    Ok(p) => {
+                        println!(
+                            "Created template at {}\n\
+                            ->  vim {}   # edit, test, iterate\n\
+                            ->  uni add {}   # register once ready",
+                            p.display(), p.display(), p.display()
+                        );
+                    }
+                    Err(e) => eprintln!("Failed to write template: {e}"),
+                }
+            }
+        }
+        "export" => {
+            let file_path = if remaining_args.is_empty() {
+                print!("Enter export file path (default: plugins.zip): ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let input = input.trim();
+                if input.is_empty() {
+                    PathBuf::from("plugins.zip")
+                } else {
+                    PathBuf::from(input)
+                }
+            } else {
+                PathBuf::from(remaining_args[0])
+            };
+            export_plugins(&file_path)?;
+        }
+        "import" => {
+            if remaining_args.is_empty() {
+                print!("Enter import file path: ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                let path = PathBuf::from(input.trim());
+                import_plugins(&path)?;
+            } else {
+                let path = PathBuf::from(remaining_args[0]);
+                import_plugins(&path)?;
+            }
+        }
+        "ensure-python" => {
+            let force = remaining_args.contains(&"--force");
+            
+            /* ---------- 3.1 ensure CPython 3.13.3 ---------- */
+            let need_python = match current_python_version() {
+                Some(v) if v == "3.13.3" && !force => {
+                    println!("✅ Python 3.13.3 already installed"); false
+                }
+                Some(v) => { println!("ℹ️  Found Python {v}, upgrading to 3.13.3"); true }
+                None     => { println!("🚫 No python3 – installing 3.13.3"); true }
+            };
+            if need_python {
+                match install_python() {
+                    Ok(_)  => println!("🎉 Python 3.13.3 ready ✔"),
+                    Err(e) => { eprintln!("❌ Python install failed: {e}"); return Ok(()); }
+                }
+            }
+
+            /* ---------- 3.2 ensure uv ---------- */
+            match current_uv_version() {
+                Some(v) => println!("✅ uv {v} already installed"),
+                None => {
+                    println!("→ installing uv …");
+                    match install_uv() {
+                        Ok(_)  => println!("🎉 uv installed ✔"),
+                        Err(e) => eprintln!("❌ uv install failed: {e}"),
+                    }
+                }
+            }
+        }
+        _ => {
+            // It's a plugin command - execute it with the remaining arguments
+            execute_plugin_command(command_name, &remaining_args)?;
+        }
+    }
+    
+    Ok(())
+}
+
+fn execute_plugin_command(plugin_name: &str, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    let script = plugin_dir().join(plugin_name);
+    
+    if !script.exists() {
+        return Err(format!("Plugin '{}' not found", plugin_name).into());
+    }
+    
+    // If no arguments provided, prompt for them
+    let final_args = if args.is_empty() {
+        // Check if this plugin has subcommands
+        let manifests = load_manifests();
+        if let Some(manifest) = manifests.iter().find(|m| m.name == plugin_name) {
+            if !manifest.commands.is_empty() {
+                println!("Available subcommands for {}:", plugin_name);
+                for cmd in &manifest.commands {
+                    println!("  {} - {}", cmd.name, cmd.description);
+                }
+                print!("Enter subcommand and arguments: ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                input.trim().split_whitespace().map(|s| s.to_string()).collect()
+            } else {
+                // No subcommands, prompt for arguments
+                print!("Enter arguments for {} (or press Enter for none): ", plugin_name);
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    input.trim().split_whitespace().map(|s| s.to_string()).collect()
+                }
+            }
+        } else {
+            // Plugin not found in manifests, prompt for arguments
+            print!("Enter arguments for {} (or press Enter for none): ", plugin_name);
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if input.trim().is_empty() {
+                Vec::new()
+            } else {
+                input.trim().split_whitespace().map(|s| s.to_string()).collect()
+            }
+        }
+    } else {
+        args.iter().map(|s| s.to_string()).collect()
+    };
+    
+    // Execute the plugin with the arguments
+    let status = Cmd::new(&script).args(&final_args).status()?;
+    exit(status.code().unwrap_or(1));
+}
+
 fn build_cli() -> Command {
     let mut cmd = Cli::command();  // static built-ins
 
@@ -455,7 +667,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check if interactive mode is requested
     if matches.get_flag("interactive") {
-        return tui::run_tui();
+        match tui::run_tui()? {
+            tui::TuiResult::Exit => return Ok(()),
+            tui::TuiResult::ExecuteCommand(command) => {
+                // Parse and execute the command from TUI
+                return execute_cli_command(&command);
+            }
+        }
     }
 
     // 1) Handle built-in subcommands if any

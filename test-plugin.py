@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.8"
 # dependencies = [
-#     ///add you dependencies here
+#     # add your dependencies here
 # ]
 # ///
 import sys, json, subprocess
